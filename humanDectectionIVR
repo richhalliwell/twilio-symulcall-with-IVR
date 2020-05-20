@@ -1,0 +1,81 @@
+/**
+ *  detect if a real users, allow to connect 1-1 or disconnect all parties
+ */
+ 
+async function disconnectCall(context, sid, answererName, rejected){
+    const client = context.getTwilioClient();
+
+    const { to } = await client.calls(sid)
+        .update({status: 'completed'});
+    const smsBody = (rejected)?
+         "Call was answered then rejected for all users by " + answerName
+        :"Call was picked up by " + answererName;
+    
+    if(to.startsWith('+447') || to.startsWith('07')){ //only text mobile numbers
+        await client.messages.create({
+            to:to,
+            from:context.SMS_SENDER_NAME,
+            body: smsBody});
+    }
+}
+
+async function endOtherCalls(context, event, answererName){
+
+    const thisCallSid = event.CallSid;
+    const syncListId = event.syncListId;
+
+    
+    const sync = Runtime.getSync();
+    const syncListItems  = await sync.syncLists(syncListId).syncListItems.list();
+
+    for (const listitem of syncListItems) {
+        const isThisCall = listitem.data.sid == thisCallSid;
+        
+        if(isThisCall){ 
+            var updatedListItem = listitem;
+            updatedListItem.data.hasAnswered = true;
+            
+            await sync.syncLists(syncListId).syncListItems(listitem.index)
+                .update(updatedListItem)
+               
+        }else{ 
+            await disconnectCall(context, listitem.data.sid, answererName);
+        }
+    }
+}
+async function endConference(context){
+    const client = context.getTwilioClient();
+    const conferences = await client.conferences.list({friendlyName:context.SIMULCALL_CONFERENCE_NAME, status:'in-progress'})
+
+    for (const conference of conferences){
+        await conference.update({status: 'completed'});
+    }
+}
+
+async function getUserInput(context, event) {
+    const answererName = decodeURIComponent(event.answererName);
+    let twiml = new Twilio.twiml.VoiceResponse();
+    let dial = twiml.dial();
+    let voiceOptions = {voice:'woman', language:'en-AU'};
+    switch (event.Digits) {
+        case '5':
+            await endOtherCalls(context, event, answererName);
+            twiml.say(voiceOptions, 'The caller hung up');
+            dial.conference({endConferenceOnExit: true}, context.SIMULCALL_CONFERENCE_NAME)
+            break;
+        case '9':
+            await endOtherCalls(context, event, 'no one - call was rejected for all users by ' + answererName);
+            await endConference(context);
+            twiml.say(voiceOptions,'I have ended the call for all users.');
+            twiml.reject();
+            break;
+        default:
+            twiml.gather({numDigits: 1, timeout: 15})
+                .say(voiceOptions, 'Someone calling hotline. Press 5 to speak to them, or 9 to hang up and disconnect everyone else. Hang up to allow someone else to handle it')          
+    }
+    return twiml;
+}
+
+exports.handler = function(context, event, callback) {
+    getUserInput(context, event).then(twiml => callback(null, twiml)).catch(error => callback(error));
+}
